@@ -33,7 +33,7 @@ def detect_carrier(track_num):
         return CARRIER_MAP["USPS"]
     # Mã e-commerce của DHL thường có tiền tố JD, GM, hoặc các dải số đặc thù
     if tn.startswith(('JD', 'JJD', 'GM', '7', '1', '420')):
-        return CARRIER_MAP["DHL_ECOMM"] # Đổi thành 14031 thay vì 10001
+        return CARRIER_MAP["DHL_ECOMM"] # Dùng 14031 cho DHL eCommerce
     return 0 # Auto-detect là an toàn nhất cho các mã lạ
 
 # Load Secrets
@@ -99,7 +99,7 @@ def send_critical_report(receiver, total_up, new_transit, sla72_count):
     except: return False
 
 # ==========================================
-# 3. GIAO DIỆN & LOGIC
+# 3. GIAO DIỆN & LOGIC CHÍNH
 # ==========================================
 st.set_page_config(page_title="Azura Multi-Carrier", page_icon="⚡")
 st.title("⚡ Azura SLA Control (USPS & DHL)")
@@ -125,7 +125,7 @@ try:
     m3.metric("Chờ InTransit", len(track_list))
 
 except Exception as e:
-    st.error(f"Lỗi: {e}")
+    st.error(f"Lỗi kết nối Sheet: {e}")
     st.stop()
 
 st.divider()
@@ -139,7 +139,7 @@ if btn_reg.button(f"🚀 Register {len(reg_list)} đơn mới", use_container_wi
         bar = st.progress(0)
         for i in range(0, len(reg_list), BATCH_SIZE):
             rows = reg_list[i:i+BATCH_SIZE]
-            # Tự nhận diện carrier cho từng mã trong lô
+            # Tự nhận diện carrier lúc register
             batch_api = [{"number": data_rows[r-2][cols['Tracking_Number']], "carrier": detect_carrier(data_rows[r-2][cols['Tracking_Number']])} for r in rows]
             requests.post(REGISTER_URL, json=batch_api, headers={"17token": TRACK17_API_KEY})
             
@@ -161,7 +161,7 @@ if btn_track.button(f"📡 Update & Check SLA >72h", use_container_width=True, t
         for i in range(0, len(track_list), BATCH_SIZE):
             batch = track_list[i:i+BATCH_SIZE]
             
-            # CHỈ truyền tracking number, bỏ carrier để 17Track tự dùng carrier đã register
+            # CHỈ truyền tracking number, KHÔNG truyền carrier để 17Track tự động dùng dữ liệu đã lưu
             batch_api = [{"number": x['num']} for x in batch]
             
             res = requests.post(TRACK_INFO_URL, json=batch_api, headers={"17token": TRACK17_API_KEY}).json()
@@ -169,7 +169,7 @@ if btn_track.button(f"📡 Update & Check SLA >72h", use_container_width=True, t
             rejected = res.get("data", {}).get("rejected", [])
             
             if rejected:
-                print("Rejected items:", rejected) # Log ra terminal để debug nếu cần
+                print("Rejected items (Check lại 17Track API):", rejected)
             
             updates = []
             for item in accepted:
@@ -178,13 +178,11 @@ if btn_track.button(f"📡 Update & Check SLA >72h", use_container_width=True, t
                 new_stt = (info.get("latest_status") or {}).get("status", "Pending")
                 
                 orig = next(x for x in batch if x['num'] == num)
-                if new_stt == "InTransit" and orig['old_stt'] != "InTransit":
-                    new_in_transit += 1
                 
                 l_vn, t_vn = "", ""
                 all_events = []
                 
-                # Gom toàn bộ event từ tất cả các providers (DHL và Last-mile carrier như USPS)
+                # Gom toàn bộ events từ tất cả các providers (DHL + USPS)
                 providers = info.get("tracking", {}).get("providers", []) or []
                 for p in providers:
                     all_events.extend(p.get("events", []))
@@ -196,8 +194,21 @@ if btn_track.button(f"📡 Update & Check SLA >72h", use_container_width=True, t
                     
                     if ("label created" in desc or "info received" in desc) and not l_vn: 
                         l_vn = t_str
-                    if ("in transit" in desc or "accepted" in desc or "picked up" in desc or "arrived" in desc) and not t_vn: 
+                    # Bổ sung các keywords mở rộng cho việc lấy thời gian Transit thực tế
+                    if ("in transit" in desc or "accepted" in desc or "picked up" in desc or "arrived" in desc or "depart" in desc or "processed" in desc) and not t_vn: 
                         t_vn = t_str
+                
+                # --- LOGIC ÉP TRẠNG THÁI ---
+                # Ép lại trạng thái dựa trên thực tế event để chống lag từ 17Track
+                if new_stt not in ["Delivered", "Returned", "Expired"]:
+                    if t_vn:
+                        new_stt = "InTransit"
+                    elif l_vn:
+                        new_stt = "InfoReceived"
+                        
+                # Tính tổng InTransit mới
+                if new_stt == "InTransit" and orig['old_stt'] != "InTransit":
+                    new_in_transit += 1
                 
                 eff_label = l_vn if l_vn else orig['old_label']
                 sla = calculate_sla(eff_label, t_vn)
