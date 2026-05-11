@@ -26,13 +26,15 @@ CARRIER_MAP = {
 }
 
 def detect_carrier(track_num):
-    """Tự động nhận diện carrier hoặc trả về 0 để 17Track tự đoán"""
+    """Tự động nhận diện carrier. Ưu tiên USPS và DHL eCommerce."""
     tn = str(track_num).strip().upper()
+    # USPS thường có 22 số hoặc bắt đầu bằng 9
     if tn.startswith('9') or len(tn) == 22:
         return CARRIER_MAP["USPS"]
-    if tn.startswith(('JD', 'JJD', '7', '1')) or len(tn) == 10:
-        return CARRIER_MAP["DHL"]
-    return 0 # Auto-detect
+    # Mã e-commerce của DHL thường có tiền tố JD, GM, hoặc các dải số đặc thù
+    if tn.startswith(('JD', 'JJD', 'GM', '7', '1', '420')):
+        return CARRIER_MAP["DHL_ECOMM"] # Đổi thành 14031 thay vì 10001
+    return 0 # Auto-detect là an toàn nhất cho các mã lạ
 
 # Load Secrets
 try:
@@ -158,10 +160,16 @@ if btn_track.button(f"📡 Update & Check SLA >72h", use_container_width=True, t
 
         for i in range(0, len(track_list), BATCH_SIZE):
             batch = track_list[i:i+BATCH_SIZE]
-            batch_api = [{"number": x['num'], "carrier": detect_carrier(x['num'])} for x in batch]
+            
+            # CHỈ truyền tracking number, bỏ carrier để 17Track tự dùng carrier đã register
+            batch_api = [{"number": x['num']} for x in batch]
             
             res = requests.post(TRACK_INFO_URL, json=batch_api, headers={"17token": TRACK17_API_KEY}).json()
             accepted = res.get("data", {}).get("accepted", [])
+            rejected = res.get("data", {}).get("rejected", [])
+            
+            if rejected:
+                print("Rejected items:", rejected) # Log ra terminal để debug nếu cần
             
             updates = []
             for item in accepted:
@@ -174,12 +182,22 @@ if btn_track.button(f"📡 Update & Check SLA >72h", use_container_width=True, t
                     new_in_transit += 1
                 
                 l_vn, t_vn = "", ""
-                events = (info.get("tracking", {}).get("providers", []) or [{}])[0].get("events", [])
-                for ev in sorted(events, key=lambda x: x.get("time_utc", "")):
+                all_events = []
+                
+                # Gom toàn bộ event từ tất cả các providers (DHL và Last-mile carrier như USPS)
+                providers = info.get("tracking", {}).get("providers", []) or []
+                for p in providers:
+                    all_events.extend(p.get("events", []))
+                
+                # Sắp xếp và trích xuất thời gian
+                for ev in sorted(all_events, key=lambda x: x.get("time_utc", "")):
                     desc = ev.get("description", "").lower()
                     t_str = to_vn_time(ev.get("time_utc"))
-                    if ("label created" in desc or "info received" in desc) and not l_vn: l_vn = t_str
-                    if ("in transit" in desc or "accepted" in desc or "picked up" in desc) and not t_vn: t_vn = t_str
+                    
+                    if ("label created" in desc or "info received" in desc) and not l_vn: 
+                        l_vn = t_str
+                    if ("in transit" in desc or "accepted" in desc or "picked up" in desc or "arrived" in desc) and not t_vn: 
+                        t_vn = t_str
                 
                 eff_label = l_vn if l_vn else orig['old_label']
                 sla = calculate_sla(eff_label, t_vn)
