@@ -26,15 +26,21 @@ CARRIER_MAP = {
 }
 
 def detect_carrier(track_num):
-    """Tự động nhận diện carrier. Ưu tiên USPS và DHL eCommerce."""
+    """Tự động nhận diện carrier. Phân biệt rõ USPS mã vạch dài và DHL."""
     tn = str(track_num).strip().upper()
-    # USPS thường có 22 số hoặc bắt đầu bằng 9
-    if tn.startswith('9') or len(tn) == 22:
+    
+    # 1. Nhận diện USPS:
+    # - Bắt đầu bằng '9'
+    # - Dài đúng 22 số
+    # - Bắt đầu bằng '420' VÀ độ dài >= 30 (Mã vạch IMpb chứa Zipcode của USPS)
+    if tn.startswith('9') or len(tn) == 22 or (tn.startswith('420') and len(tn) >= 30):
         return CARRIER_MAP["USPS"]
-    # Mã e-commerce của DHL thường có tiền tố JD, GM, hoặc các dải số đặc thù
-    if tn.startswith(('JD', 'JJD', 'GM', '7', '1', '420')):
-        return CARRIER_MAP["DHL_ECOMM"] # Dùng 14031 cho DHL eCommerce
-    return 0 # Auto-detect là an toàn nhất cho các mã lạ
+        
+    # 2. Nhận diện DHL eCommerce:
+    if tn.startswith(('JD', 'JJD', 'GM', '7', '1')):
+        return CARRIER_MAP["DHL_ECOMM"]
+        
+    return 0 # Auto-detect an toàn cho các mã còn lại
 
 # Load Secrets
 try:
